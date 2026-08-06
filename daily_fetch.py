@@ -1,62 +1,68 @@
-"""GitHub Actions定时抓取脚本 - 每日9点自动抓取热点"""
-import os
-import sys
-from datetime import datetime
+"""
+定时抓取脚本 —— 供 GitHub Actions 调用
+每天早9点自动执行，抓取热点数据写入Supabase
+"""
 
-# 配置（GitHub Actions用环境变量）
-config = {
-    "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
-    "SUPABASE_URL": os.environ.get("SUPABASE_URL", ""),
-    "SUPABASE_KEY": os.environ.get("SUPABASE_KEY", ""),
-    "TIKHUB_API_KEY": os.environ.get("TIKHUB_API_KEY", ""),
-}
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+
+from api_service import fetch_douyin_hot, search_xiaohongshu, classify_video
+from db import insert_hot_video, cleanup_old_videos
+from config import XHS_KEYWORDS_TRACK, XHS_KEYWORDS_BROAD
+from datetime import date
 
 
 def main():
-    print(f"=== 开始抓取 {datetime.now().strftime('%Y-%m-%d %H:%M')} ===")
-    
-    # 检查配置
-    if not config["TIKHUB_API_KEY"]:
-        print("⚠️ TikHub API Key未配置，跳过抓取")
-        print("提示：在GitHub仓库Settings → Secrets → Actions中配置TIKHUB_API_KEY")
-        return
-    
-    # 延迟导入（避免GitHub Actions缺包报错）
-    try:
-        from api_service import fetch_douyin_hot
-        from db import Database
-    except ImportError as e:
-        print(f"❌ 导入失败: {e}")
-        return
-    
-    db = Database(config)
-    if not db.client:
-        print("❌ 数据库连接失败")
-        return
-    
-    # 抓取抖音热榜
-    print("正在抓取抖音热榜...")
-    result = fetch_douyin_hot(config)
-    
-    if result["success"]:
-        items = result["data"]
-        print(f"✅ 抓取成功，共 {len(items)} 条")
-        
-        saved = 0
-        for item in items[:15]:
-            save_result = db.save_hot_topic({
-                "word": item.get("word", ""),
-                "hot_value": str(item.get("hot_value", "")),
-                "source": "douyin"
-            })
-            if save_result["success"]:
-                saved += 1
-        
-        print(f"✅ 保存到数据库 {saved} 条")
-    else:
-        print(f"❌ 抓取失败: {result['error']}")
-    
-    print("=== 抓取完成 ===")
+    print(f"=== 每日热点抓取 {date.today()} ===")
+
+    # 1. 抓取
+    print("[1/4] 抓取抖音热榜...")
+    dy = fetch_douyin_hot(top_n=30)
+    print(f"  获取 {len(dy)} 条")
+
+    print("[2/4] 搜索小红书...")
+    xhs = search_xiaohongshu(XHS_KEYWORDS_TRACK + XHS_KEYWORDS_BROAD, per_keyword=5)
+    print(f"  获取 {len(xhs)} 条")
+
+    # 2. 去重
+    all_videos = dy + xhs
+    seen = set()
+    unique = []
+    for v in all_videos:
+        vid = v.get("video_id", "")
+        if vid and vid not in seen:
+            seen.add(vid)
+            unique.append(v)
+    print(f"  去重后 {len(unique)} 条")
+
+    # 3. 分类+入库
+    print("[3/4] AI分类+入库...")
+    success = 0
+    for v in unique:
+        try:
+            cat = classify_video(v.get("title", ""), v.get("desc", ""))
+            v["category"] = cat.get("category", "泛赛道")
+            v["reason"] = cat.get("reason", "")
+        except Exception as e:
+            v["category"] = "泛赛道"
+            v["reason"] = f"分类失败: {e}"
+
+        v["fetch_date"] = date.today().isoformat()
+        try:
+            insert_hot_video(v)
+            success += 1
+        except Exception:
+            continue  # 重复跳过
+
+    print(f"  成功入库 {success} 条")
+
+    # 4. 清理旧数据
+    print("[4/4] 清理旧数据...")
+    deleted = cleanup_old_videos(30)
+    print(f"  清理 {deleted} 条")
+
+    print(f"=== 完成！新增 {success} 条 ===")
 
 
 if __name__ == "__main__":
