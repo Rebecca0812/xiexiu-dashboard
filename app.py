@@ -1,7 +1,7 @@
 
 """
 抠搜邪修音疗 · 自媒体运营工作台
-简化一致版 - 只依赖 memos 和 hot_topics 两张表
+最终版 - 支持粘贴视频链接自动解析
 """
 
 import streamlit as st
@@ -83,7 +83,7 @@ def render_inspiration(db, api):
         st.markdown("#### 📺 抖音热榜")
         if st.button("🔄 抓取抖音热榜", use_container_width=True):
             if not TIKHUB_API_KEY:
-                st.warning("TikHub API Key未配置，无法抓取。请先配置。")
+                st.warning("TikHub API Key未配置")
             else:
                 with st.spinner("正在抓取..."):
                     items = api.fetch_douyin_hot(15)
@@ -96,7 +96,7 @@ def render_inspiration(db, api):
                                 pass
                         st.success(f"抓取成功，共 {len(items)} 条")
                     else:
-                        st.error("抓取失败")
+                        st.error("抓取失败，请查看日志")
 
         st.markdown("#### 📕 小红书搜索")
         keyword = st.text_input("关键词", placeholder="如：颂钵平替、助眠好物")
@@ -108,7 +108,7 @@ def render_inspiration(db, api):
                     results = api.search_xiaohongshu(keyword, 10)
                     if results:
                         for r in results:
-                            st.markdown(f"**{r['title']}**  ❤️{r.get('like_count', 0)}")
+                            st.markdown(f"**{r['title']}**  ❤️{r.get('like_count', 0)} 💬{r.get('comment_count', 0)}")
                     else:
                         st.info("未搜到结果")
 
@@ -152,17 +152,60 @@ def render_inspiration(db, api):
                         st.error(f"生成失败: {e}")
 
 
-# ==================== 模块2：爆款二创 ====================
+# ==================== 模块2：爆款二创（支持链接解析）====================
 
 def render_recreation(api):
     st.markdown("### 🔥 爆款视频二创")
-    st.markdown("输入爆款视频信息，AI帮你生成符合人设的二创脚本")
+    st.markdown("粘贴抖音/小红书链接自动解析，或手动输入视频信息")
+
+    # 链接解析区
+    st.markdown("#### 📎 第一步：粘贴爆款链接（自动解析）")
+    video_url = st.text_input("视频链接", placeholder="粘贴抖音或小红书分享链接")
+
+    col_btn1, col_btn2 = st.columns([1, 3])
+    with col_btn1:
+        parse_clicked = st.button("🔍 解析视频", use_container_width=True)
+
+    if parse_clicked and video_url:
+        if not TIKHUB_API_KEY:
+            st.warning("TikHub API Key未配置，无法解析链接")
+        else:
+            with st.spinner("正在解析视频..."):
+                try:
+                    info = api.parse_video_link(video_url)
+                    if "error" in info:
+                        st.error(info["error"])
+                    else:
+                        st.session_state["parsed_video"] = info
+                        st.success("✅ 解析成功！")
+                except Exception as e:
+                    st.error(f"解析失败: {e}")
+
+    # 显示解析结果
+    if "parsed_video" in st.session_state:
+        info = st.session_state["parsed_video"]
+        st.markdown("---")
+        st.markdown("#### 📋 解析结果")
+        st.markdown(f"**标题：** {info.get('title', '')}")
+        st.markdown(f"**作者：** {info.get('author', '')}")
+        st.markdown(f"**点赞：** {info.get('like_count', 0)}  **评论：** {info.get('comment_count', 0)}")
+        st.markdown(f"**描述：** {info.get('desc', '')[:200]}")
+
+    # 手动输入区
+    st.markdown("---")
+    st.markdown("#### ✏️ 或直接输入视频信息")
+
+    default_title = ""
+    default_desc = ""
+    if "parsed_video" in st.session_state:
+        default_title = st.session_state["parsed_video"].get("title", "")
+        default_desc = st.session_state["parsed_video"].get("desc", "")
 
     col1, col2 = st.columns([3, 2])
 
     with col1:
-        video_title = st.text_input("📺 爆款视频标题", placeholder="粘贴视频标题")
-        video_desc = st.text_area("📝 视频文案/描述", height=80, placeholder="粘贴视频文案内容...")
+        video_title = st.text_input("视频标题", value=default_title, placeholder="粘贴视频标题")
+        video_desc = st.text_area("视频文案/描述", value=default_desc, height=100, placeholder="粘贴视频文案内容...")
 
     with col2:
         st.markdown("#### ⚙️ 生成选项")
@@ -351,4 +394,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
