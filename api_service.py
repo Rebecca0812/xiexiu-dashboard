@@ -18,48 +18,49 @@ def _tikhub_headers():
 def detect_platform(url):
     """识别链接是抖音还是小红书"""
     url = url.lower()
-    if "douyin" in url or "iesdouyin" in url:
+    if "douyin" in url or "iesdouyin" in url or "v.douyin" in url:
         return "douyin"
     if "xiaohongshu" in url or "xhslink" in url or "rednote" in url:
         return "xiaohongshu"
     return None
 
 
-# ==================== 抖音热榜 ====================
+# ==================== 抖音热榜（已验证可用）====================
 
 def fetch_douyin_hot(top_n=20):
     try:
         with httpx.Client(timeout=30) as client:
             resp = client.get(
-                f"{TIKHUB_BASE_URL}/douyin/web/fetch_hot_search_list",
-                headers=_tikhub_headers()
+                f"{TIKHUB_BASE_URL}/douyin/app/v3/fetch_hot_search_list",
+                headers=_tikhub_headers(),
+                params={"board_type": 0, "board_sub_type": ""}
             )
-            print(f"抖音热榜状态码: {resp.status_code}")
             resp.raise_for_status()
             data = resp.json()
-            print(f"抖音热榜返回: {data.keys() if isinstance(data, dict) else type(data)}")
-        items = data.get("data", {}).get("word_list", [])
-        return [{"title": i.get("word", ""), "hot_value": i.get("hot_value", "")} for i in items[:top_n]]
+        word_list = data.get("data", {}).get("data", {}).get("word_list", [])
+        return [{"title": i.get("word", ""), "hot_value": i.get("hot_value", 0)} for i in word_list[:top_n]]
     except Exception as e:
         print(f"抖音热榜失败: {e}")
         return []
 
 
-# ==================== 小红书搜索 ====================
+# ==================== 小红书搜索（需充值）====================
 
 def search_xiaohongshu(keyword, per_page=10):
+    if not TIKHUB_API_KEY:
+        return {"error": "TikHub API Key未配置"}
     try:
         with httpx.Client(timeout=30) as client:
             resp = client.get(
-                f"{TIKHUB_BASE_URL}/xiaohongshu/web/search_notes",
+                f"{TIKHUB_BASE_URL}/xiaohongshu/app_v2/search_notes",
                 headers=_tikhub_headers(),
-                params={"keyword": keyword}
+                params={"keyword": keyword, "page": 1, "sort_type": "general"}
             )
-            print(f"小红书搜索状态码: {resp.status_code}")
+            if resp.status_code == 402:
+                return {"error": "小红书搜索需要充值TikHub余额，暂不可用"}
             if resp.status_code != 200:
-                return []
+                return {"error": f"搜索失败，状态码: {resp.status_code}"}
             data = resp.json()
-            print(f"小红书搜索返回: {data.keys() if isinstance(data, dict) else type(data)}")
         items = data.get("data", {}).get("items", [])
         results = []
         for item in items[:per_page]:
@@ -74,7 +75,7 @@ def search_xiaohongshu(keyword, per_page=10):
         return results
     except Exception as e:
         print(f"小红书搜索失败: {e}")
-        return []
+        return {"error": str(e)}
 
 
 # ==================== 链接解析（抖音/小红书）====================
@@ -83,62 +84,82 @@ def parse_video_link(url):
     """粘贴链接，自动解析视频/笔记详情"""
     platform = detect_platform(url)
     if not platform:
-        return {"error": "链接无法识别，请粘贴抖音或小红书分享链接"}
+        return {"error": "无法识别链接，请粘贴抖音或小红书分享链接"}
     if not TIKHUB_API_KEY:
         return {"error": "TikHub API Key未配置"}
 
     try:
-        with httpx.Client(timeout=30) as client:
-            if platform == "douyin":
+        # 先解析短链接获取真实URL
+        aweme_id = _extract_aweme_id(url)
+        if not aweme_id and platform == "douyin":
+            aweme_id = _resolve_douyin_url(url)
+
+        if platform == "douyin":
+            if not aweme_id:
+                return {"error": "无法从链接中提取视频ID"}
+            with httpx.Client(timeout=30) as client:
                 resp = client.get(
-                    f"{TIKHUB_BASE_URL}/douyin/web/fetch_one_video",
+                    f"{TIKHUB_BASE_URL}/douyin/app/v3/fetch_one_video",
                     headers=_tikhub_headers(),
-                    params={"url": url}
+                    params={"aweme_id": aweme_id}
                 )
-            else:
-                resp = client.get(
-                    f"{TIKHUB_BASE_URL}/xiaohongshu/web/fetch_note_info",
-                    headers=_tikhub_headers(),
-                    params={"url": url}
-                )
-            print(f"链接解析状态码: {resp.status_code}")
-            resp.raise_for_status()
-            data = resp.json()
-            print(f"链接解析返回结构: {data.keys() if isinstance(data, dict) else type(data)}")
-            return _extract_video_info(platform, data)
+                if resp.status_code == 402:
+                    return {"error": "余额不足，请充值TikHub"}
+                resp.raise_for_status()
+                data = resp.json()
+            return _extract_douyin_info(data)
+        else:
+            return {"error": "小红书链接解析需要充值TikHub余额"}
     except Exception as e:
         print(f"链接解析失败: {e}")
         return {"error": f"解析失败: {e}"}
 
 
-def _extract_video_info(platform, data):
-    """从TikHub返回数据中提取需要的信息"""
+def _extract_aweme_id(url):
+    """从URL中直接提取aweme_id"""
+    patterns = [
+        r'/video/(\d+)',
+        r'modal_id=(\d+)',
+        r'aweme_id=(\d+)',
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _resolve_douyin_url(url):
+    """解析抖音短链接，获取aweme_id"""
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, follow_redirects=True)
+            final_url = str(resp.url)
+            return _extract_aweme_id(final_url)
+    except Exception as e:
+        print(f"解析短链接失败: {e}")
+        return None
+
+
+def _extract_douyin_info(data):
+    """从TikHub返回数据中提取抖音视频信息"""
     result = {"title": "", "desc": "", "tags": "", "like_count": 0, "comment_count": 0}
     try:
-        if platform == "douyin":
-            video = data.get("data", {})
-            author = video.get("author", {}).get("nickname", "")
-            result["title"] = video.get("desc", "")[:100]
-            result["desc"] = video.get("desc", "")
-            result["tags"] = ",".join([t.get("hashtag_name", "") for t in video.get("text_extra", []) if t.get("type") == 1])
-            stats = video.get("statistics", {})
-            result["like_count"] = stats.get("digg_count", 0)
-            result["comment_count"] = stats.get("comment_count", 0)
-            result["share_count"] = stats.get("share_count", 0)
-            result["play_count"] = stats.get("play_count", 0)
-            result["author"] = author
-        else:
-            note = data.get("data", {})
-            result["title"] = note.get("title", "")[:100]
-            result["desc"] = note.get("desc", "")
-            result["tags"] = ",".join(note.get("tag_list", []))
-            interact = note.get("interact_info", {}) or {}
-            result["like_count"] = _parse_count(interact.get("liked_count", "0"))
-            result["comment_count"] = _parse_count(interact.get("comment_count", "0"))
-            result["share_count"] = _parse_count(interact.get("share_count", "0"))
-            result["author"] = note.get("user", {}).get("nickname", "")
+        detail = data.get("data", {}).get("aweme_detail", {})
+        if not detail:
+            detail = data.get("data", {})
+        result["title"] = detail.get("desc", "")[:100]
+        result["desc"] = detail.get("desc", "")
+        result["tags"] = ",".join([t.get("hashtag_name", "") for t in detail.get("text_extra", []) if t.get("type") == 1])
+        stats = detail.get("statistics", {})
+        result["like_count"] = stats.get("digg_count", 0)
+        result["comment_count"] = stats.get("comment_count", 0)
+        result["share_count"] = stats.get("share_count", 0)
+        result["play_count"] = stats.get("play_count", 0)
+        result["collect_count"] = stats.get("collect_count", 0)
+        result["author"] = detail.get("author", {}).get("nickname", "")
     except Exception as e:
-        print(f"提取信息失败: {e}")
+        print(f"提取抖音信息失败: {e}")
     return result
 
 
@@ -240,3 +261,4 @@ def analyze_review(data_text):
 
 简洁实用地回答。"""
     return _chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=2048)
+
