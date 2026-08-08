@@ -1,7 +1,7 @@
 
 """
 抠搜邪修音疗 · 自媒体运营工作台
-最终版 - 支持粘贴视频链接自动解析
+最终修复版 - 抖音功能完整可用
 """
 
 import streamlit as st
@@ -62,7 +62,7 @@ def render_sidebar():
         if TIKHUB_API_KEY:
             st.success("✅ TikHub 已连接")
         else:
-            st.warning("⚠️ TikHub 未配置（手动模式）")
+            st.warning("⚠️ TikHub 未配置")
 
         st.markdown("---")
         st.markdown("### 👤 人设档案")
@@ -89,14 +89,14 @@ def render_inspiration(db, api):
                     items = api.fetch_douyin_hot(15)
                     if items:
                         for i, item in enumerate(items):
-                            st.markdown(f"**#{i+1}** {item['title']}  🔥{item.get('hot_value', '')}")
+                            st.markdown(f"**#{i+1}** {item['title']}  🔥{item.get('hot_value', 0)}")
                             try:
-                                db.insert_hot_topic(item['title'], item.get('hot_value', ''))
+                                db.insert_hot_topic(item['title'], item.get('hot_value', 0))
                             except Exception:
                                 pass
-                        st.success(f"抓取成功，共 {len(items)} 条")
+                        st.success(f"✅ 抓取成功，共 {len(items)} 条")
                     else:
-                        st.error("抓取失败，请查看日志")
+                        st.error("抓取失败，请稍后重试")
 
         st.markdown("#### 📕 小红书搜索")
         keyword = st.text_input("关键词", placeholder="如：颂钵平替、助眠好物")
@@ -106,7 +106,9 @@ def render_inspiration(db, api):
             else:
                 with st.spinner("搜索中..."):
                     results = api.search_xiaohongshu(keyword, 10)
-                    if results:
+                    if isinstance(results, dict) and "error" in results:
+                        st.warning(results["error"])
+                    elif results:
                         for r in results:
                             st.markdown(f"**{r['title']}**  ❤️{r.get('like_count', 0)} 💬{r.get('comment_count', 0)}")
                     else:
@@ -156,11 +158,11 @@ def render_inspiration(db, api):
 
 def render_recreation(api):
     st.markdown("### 🔥 爆款视频二创")
-    st.markdown("粘贴抖音/小红书链接自动解析，或手动输入视频信息")
+    st.markdown("粘贴抖音链接自动解析，或手动输入视频信息")
 
     # 链接解析区
     st.markdown("#### 📎 第一步：粘贴爆款链接（自动解析）")
-    video_url = st.text_input("视频链接", placeholder="粘贴抖音或小红书分享链接")
+    video_url = st.text_input("视频链接", placeholder="粘贴抖音分享链接（如：https://v.douyin.com/xxx）")
 
     col_btn1, col_btn2 = st.columns([1, 3])
     with col_btn1:
@@ -173,7 +175,7 @@ def render_recreation(api):
             with st.spinner("正在解析视频..."):
                 try:
                     info = api.parse_video_link(video_url)
-                    if "error" in info:
+                    if isinstance(info, dict) and "error" in info:
                         st.error(info["error"])
                     else:
                         st.session_state["parsed_video"] = info
@@ -188,8 +190,9 @@ def render_recreation(api):
         st.markdown("#### 📋 解析结果")
         st.markdown(f"**标题：** {info.get('title', '')}")
         st.markdown(f"**作者：** {info.get('author', '')}")
-        st.markdown(f"**点赞：** {info.get('like_count', 0)}  **评论：** {info.get('comment_count', 0)}")
-        st.markdown(f"**描述：** {info.get('desc', '')[:200]}")
+        st.markdown(f"**点赞：** {info.get('like_count', 0):,}  **评论：** {info.get('comment_count', 0):,}  **分享：** {info.get('share_count', 0):,}")
+        if info.get('desc'):
+            st.markdown(f"**描述：** {info.get('desc', '')[:200]}")
 
     # 手动输入区
     st.markdown("---")
@@ -237,12 +240,13 @@ def render_recreation(api):
                 try:
                     scores = api.check_persona(st.session_state["recreation"])
                     if "error" not in scores:
-                        cols = st.columns(len(scores) - 1)
+                        score_items = [(k, v) for k, v in scores.items() if k != "suggestions"]
+                        cols = st.columns(len(score_items))
                         total = 0
-                        for col, (dim, score) in zip(cols, [(k, v) for k, v in scores.items() if k != "suggestions"]):
+                        for col, (dim, score) in zip(cols, score_items):
                             col.metric(dim, f"{score}/10")
                             total += score
-                        avg = total / (len(scores) - 1)
+                        avg = total / len(score_items) if score_items else 0
                         if avg >= 8:
                             st.success(f"✅ 人设一致性：{avg:.1f}/10，非常符合！")
                         elif avg >= 6:
@@ -394,5 +398,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
